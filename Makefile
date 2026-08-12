@@ -53,6 +53,13 @@ OC_CTX        ?= $(shell expr $(CTX) / $(NP))
 OC_MAX_TOKENS ?= 8192
 OC_PROMPT     ?= $(CHAT_PROMPT)
 
+# opencode-sandbox runs opencode *from* OC_SANDBOX, so files it creates land
+# there rather than in this repo, and loads OC_SANDBOX_CONFIG (which is this
+# repo's config plus a deny rule for this repo) via OPENCODE_CONFIG. Generated
+# per run because it hardcodes absolute paths -- gitignored, don't commit it.
+OC_SANDBOX        ?= $(HOME)/tmp/muse-glimmer-sandbox
+OC_SANDBOX_CONFIG ?= opencode.sandbox.json
+
 # the llama.cpp checkout is a sibling clone, not this directory
 LLAMA_CPP ?= $(HOME)/projects/llama-cpp/llama.cpp
 BUILD_DIR ?= $(LLAMA_CPP)/build
@@ -69,7 +76,8 @@ ARCH_SYM ?= LLM_ARCH_MUSE_GLIMMER
 ARCH_SRC ?= $(LLAMA_CPP)/src/llama-arch.cpp
 
 .PHONY: run help build check-arch version clean server status stop demo chat check-server \
-        opencode opencode-config opencode-check opencode-run download-models list-models build-help
+        opencode opencode-config opencode-check opencode-run opencode-sandbox \
+        download-models list-models build-help
 
 help:
 	@echo "Targets:"
@@ -87,10 +95,11 @@ help:
 	@echo "  chat             one-shot /v1/chat/completions prompt (needs a running server)"
 	@echo "  opencode         open the opencode TUI against $(OC_MODEL)"
 	@echo "  opencode-run     one-shot headless opencode prompt"
+	@echo "  opencode-sandbox opencode in $(OC_SANDBOX), read-only against this repo"
 	@echo "  opencode-config  (re)write $(OC_CONFIG) from the vars above"
 	@echo "  build-help       show the upstream build instructions"
 	@echo
-	@echo "Overridable: HF_REPO HF_MODEL MODEL_FILE MMPROJ_FILE DRAFT_FILE ALIAS CTX NP HOST PORT TEMP TOP_P TOP_K LLAMA_CPP SERVER CLI LLAMA LOG BUILD_DIR JOBS ARCH_SYM ARCH_SRC CHAT_PROMPT CHAT_TOKENS CHAT_TIMEOUT CHAT_REASONING OPENCODE OC_PROVIDER OC_CONFIG OC_MODEL OC_CTX OC_MAX_TOKENS OC_PROMPT"
+	@echo "Overridable: HF_REPO HF_MODEL MODEL_FILE MMPROJ_FILE DRAFT_FILE ALIAS CTX NP HOST PORT TEMP TOP_P TOP_K LLAMA_CPP SERVER CLI LLAMA LOG BUILD_DIR JOBS ARCH_SYM ARCH_SRC CHAT_PROMPT CHAT_TOKENS CHAT_TIMEOUT CHAT_REASONING OPENCODE OC_PROVIDER OC_CONFIG OC_MODEL OC_CTX OC_MAX_TOKENS OC_PROMPT OC_SANDBOX OC_SANDBOX_CONFIG OC_BASH"
 	@echo "  e.g. make run PORT=8081 NP=2"
 	@echo "  llama.cpp checkout: $(LLAMA_CPP)"
 
@@ -215,18 +224,45 @@ chat: check-server
 	print("[finish: %s  tokens: %s prompt / %s completion]" % (c.get("finish_reason"), u.get("prompt_tokens"), u.get("completion_tokens")), file=sys.stderr); \
 	sys.exit("error: content empty -- all %s tokens went to reasoning_content. Raise CHAT_TOKENS (now %s), or CHAT_REASONING=1 to see the trace." % (u.get("completion_tokens"), os.environ["CHAT_TOKENS"])) if not body else None'
 
+# $(1) output path, $(2) directory to guard ("" for none). opencode evaluates
+# the LAST matching permission rule, so the broad "*" goes first and the narrow
+# deny last.
+#
+# The guard is a *substring* pattern on the directory's basename, not its
+# absolute path, and that is not a shortcut -- edit patterns are matched against
+# path.relative(worktree, target), so an absolute pattern silently never fires.
+# Both "$(2)/**" and "../*" were tried against a real session and the write went
+# through both times; "*basename*" is what actually denied it, and it holds
+# whatever the path relativizes to. Patterns are regex-anchored with * -> .*, so
+# a leading and trailing * is a plain substring match.
+#
+# bash needs its own rule: edit only governs the write/edit tools, and a model
+# told "no" by those will reach for `echo > file` next (measured). Its patterns
+# match the command string, which a determined model can trivially rephrase --
+# hence OC_BASH=ask as the real backstop, with the substring deny on top.
+# external_directory patterns *are* absolute paths, and $(2) is allowed there so
+# the session can still read this repo without prompting.
+OC_BASH ?= ask
+define oc-write-config
+ALIAS="$(ALIAS)" HOST="$(HOST)" PORT="$(PORT)" OC_PROVIDER="$(OC_PROVIDER)" \
+OC_CTX="$(OC_CTX)" OC_MAX_TOKENS="$(OC_MAX_TOKENS)" TEMP="$(TEMP)" TOP_P="$(TOP_P)" \
+OC_BASH="$(OC_BASH)" OC_PROTECT="$(2)" python3 -c 'import json, os, sys; \
+e = os.environ; \
+model = {"name": e["ALIAS"] + " (llama.cpp)", "attachment": True, "reasoning": True, "tool_call": True, "temperature": True, "limit": {"context": int(e["OC_CTX"]), "output": int(e["OC_MAX_TOKENS"])}, "options": {"temperature": float(e["TEMP"]), "top_p": float(e["TOP_P"])}}; \
+provider = {"name": "llama.cpp (local)", "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://%s:%s/v1" % (e["HOST"], e["PORT"])}, "models": {e["ALIAS"]: model}}; \
+cfg = {"$$schema": "https://opencode.ai/config.json", "model": e["OC_PROVIDER"] + "/" + e["ALIAS"], "provider": {e["OC_PROVIDER"]: provider}}; \
+p = e.get("OC_PROTECT"); \
+guard = "*" + os.path.basename(p.rstrip("/")) + "*" if p else None; \
+cfg.update({"permission": {"edit": {"*": "allow", guard: "deny"}, "bash": {"*": e["OC_BASH"], guard: "deny"}, "external_directory": {"*": "ask", p + "/**": "allow"}}}) if p else None; \
+json.dump(cfg, sys.stdout, indent=2); \
+print()' > $(1).tmp && mv $(1).tmp $(1)
+endef
+
 # opencode merges ./$(OC_CONFIG) over ~/.config/opencode/opencode.json, so the
 # provider only exists while opencode runs from this directory. Regenerate after
 # changing HOST/PORT/ALIAS/CTX/NP -- the checked-in file holds the defaults.
 opencode-config:
-	@ALIAS="$(ALIAS)" HOST="$(HOST)" PORT="$(PORT)" OC_PROVIDER="$(OC_PROVIDER)" \
-	 OC_CTX="$(OC_CTX)" OC_MAX_TOKENS="$(OC_MAX_TOKENS)" TEMP="$(TEMP)" TOP_P="$(TOP_P)" \
-	 python3 -c 'import json, os, sys; \
-	e = os.environ; \
-	model = {"name": e["ALIAS"] + " (llama.cpp)", "attachment": True, "reasoning": True, "tool_call": True, "temperature": True, "limit": {"context": int(e["OC_CTX"]), "output": int(e["OC_MAX_TOKENS"])}, "options": {"temperature": float(e["TEMP"]), "top_p": float(e["TOP_P"])}}; \
-	provider = {"name": "llama.cpp (local)", "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://%s:%s/v1" % (e["HOST"], e["PORT"])}, "models": {e["ALIAS"]: model}}; \
-	json.dump({"$$schema": "https://opencode.ai/config.json", "model": e["OC_PROVIDER"] + "/" + e["ALIAS"], "provider": {e["OC_PROVIDER"]: provider}}, sys.stdout, indent=2); \
-	print()' > $(OC_CONFIG).tmp && mv $(OC_CONFIG).tmp $(OC_CONFIG)
+	@$(call oc-write-config,$(OC_CONFIG),)
 	@echo "wrote $(OC_CONFIG): $(OC_MODEL) -> http://$(HOST):$(PORT)/v1 (context $(OC_CTX), max output $(OC_MAX_TOKENS))"
 
 opencode: check-server opencode-check
@@ -235,6 +271,15 @@ opencode: check-server opencode-check
 # headless equivalent of chat, but through opencode's agent loop (tools and all)
 opencode-run: check-server opencode-check
 	$(OPENCODE) run --model $(OC_MODEL) "$(OC_PROMPT)"
+
+# OPENCODE_CONFIG loads an *additional* config, so the global one (and its
+# providers) still applies -- only the cwd-based project config is left behind,
+# which is the point: this repo stops being the project opencode edits.
+opencode-sandbox: check-server opencode-check
+	@$(call oc-write-config,$(OC_SANDBOX_CONFIG),$(CURDIR))
+	@mkdir -p "$(OC_SANDBOX)"
+	@echo "opencode sandbox: $(OC_SANDBOX)  (edits outside it are denied; $(CURDIR) stays readable)"
+	cd "$(OC_SANDBOX)" && OPENCODE_CONFIG="$(CURDIR)/$(OC_SANDBOX_CONFIG)" $(OPENCODE) --model $(OC_MODEL)
 
 opencode-check:
 	@if ! command -v $(OPENCODE) >/dev/null 2>&1; then \

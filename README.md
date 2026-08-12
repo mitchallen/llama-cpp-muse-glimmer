@@ -120,6 +120,7 @@ make stop               # shut it down
 | `chat` | One-shot `/v1/chat/completions` prompt against a running server |
 | `opencode` | Open the [opencode](https://opencode.ai) TUI against the running server |
 | `opencode-run` | One-shot headless opencode prompt |
+| `opencode-sandbox` | opencode working in `OC_SANDBOX`, read-only against this repo |
 | `opencode-config` | (Re)write `opencode.json` from the Makefile variables |
 | `build-help` | Upstream build docs pointer |
 
@@ -190,6 +191,58 @@ make opencode-config PORT=8081        # rewrites opencode.json from the Makefile
 ```
 
 Verify what opencode resolved with `opencode models llama-cpp`.
+
+### Keeping it out of this folder
+
+`make opencode` makes *this repo* the project opencode edits. To let it create
+files without touching this folder, use the sandbox target:
+
+```sh
+make opencode-sandbox                              # works in ~/tmp/muse-glimmer-sandbox
+make opencode-sandbox OC_SANDBOX=~/scratch/foo     # somewhere else
+```
+
+It runs opencode with its working directory set to `OC_SANDBOX`, so anything it
+creates lands there, and points `OPENCODE_CONFIG` back at a generated
+`opencode.sandbox.json` here. `OPENCODE_CONFIG` loads an *additional* config, so
+your global providers still work — only the cwd-based project config is left
+behind, which is the whole point. That generated file is gitignored, rewritten
+on every run, and hardcodes absolute paths; don't commit it.
+
+On top of the working directory it sets three permission rules, each of which
+was checked against a real session rather than assumed:
+
+| Rule | Effect |
+| --- | --- |
+| `edit: {"*": "allow", "*llama-cpp-muse-glimmer*": "deny"}` | the write/edit tools refuse any path naming this repo |
+| `bash: {"*": "ask", "*llama-cpp-muse-glimmer*": "deny"}` | shell commands naming this repo are refused; everything else prompts |
+| `external_directory: {"*": "ask", "<repo>/**": "allow"}` | reading this repo needs no prompt, other outside dirs ask |
+
+So the model can read `opencode.json` here, and gets refused when it tries to
+write:
+
+```
+✗ Write .../SANDBOX_TEST.txt failed
+Error: The user has specified a rule which prevents you from using this tool call
+```
+
+Two things are worth knowing, because both bit during testing:
+
+- **`edit` patterns are not absolute paths.** They match
+  `path.relative(worktree, target)`, so a rule like `"/Users/you/repo/**":
+  "deny"` looks right and silently never fires — the write goes straight
+  through. The substring form is what actually matches, whatever the path
+  relativizes to.
+- **`edit` doesn't cover `bash`.** A model refused by the write tool will try
+  `echo hello > file` next; that's measured behaviour, not a hypothetical. The
+  `bash` rule is the backstop, but it matches the *command string*, which is
+  easy to rephrase — the real protection is `bash: ask`, i.e. you approving each
+  command. Set `OC_BASH=allow` if you find that tedious, and accept that the
+  sandbox then leaks.
+
+That makes this a guard against accidents, **not** a security boundary. Don't
+run the sandbox with `--auto` (it approves every `ask`), and if you need a hard
+guarantee, point opencode at a copy of the repo instead.
 
 ### Give it the whole context window
 
