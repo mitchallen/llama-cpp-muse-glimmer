@@ -52,11 +52,26 @@ graceful.
 - **Build `b10353` or newer** is required. The article notes Homebrew's formula
   was still on `b10330`, so `brew install llama.cpp` is not sufficient — build
   from source.
-- **Verify the checkout knows about the model** before building:
+- **An existing clone needs updating.** If you cloned llama.cpp before Muse
+  Glimmer landed, `make build` compiles a tree that can't load the model. Pull
+  first:
 
   ```sh
-  grep -c LLM_ARCH_MUSE_GLIMMER ~/projects/llama-cpp/llama.cpp/src/llama-arch.cpp   # -> 1
+  git -C ~/projects/llama-cpp/llama.cpp pull
   ```
+
+- **`make build` verifies this for you.** It depends on `check-arch`, which
+  greps `$(LLAMA_CPP)/src/llama-arch.cpp` for `LLM_ARCH_MUSE_GLIMMER` and stops
+  before CMake runs if the symbol isn't there, so a stale checkout fails in a
+  second instead of after a full build:
+
+  ```sh
+  $ make check-arch
+  check-arch: LLM_ARCH_MUSE_GLIMMER present in llama-arch.cpp (b10362)
+  ```
+
+  On a stale tree it names the fix (`git -C … pull`) and exits 1. Run it
+  standalone any time; override the symbol or path with `ARCH_SYM` / `ARCH_SRC`.
 
 - **Do not shallow-clone.** `--depth 1` breaks llama.cpp's build-number
   calculation, and the build number is exactly what you're checking here.
@@ -77,7 +92,8 @@ built with AppleClang 21.0.0.21000101 for Darwin arm64
 
 ```sh
 git clone https://github.com/ggml-org/llama.cpp ~/projects/llama-cpp/llama.cpp   # full clone
-make build              # cmake configure + build (Release, CURL on)
+git -C ~/projects/llama-cpp/llama.cpp pull   # or this, if you already had a clone
+make build              # check-arch, then cmake configure + build (Release, CURL on)
 make download-models    # ~18 GB of GGUFs into the HF cache
 make server             # build, then serve on 127.0.0.1:8080
 make status             # is it up?
@@ -90,6 +106,7 @@ make stop               # shut it down
 | Target | What it does |
 | --- | --- |
 | `build` | Configure + build `$(LLAMA_CPP)` with CMake (Release, `LLAMA_CURL=ON`) |
+| `check-arch` | Fail unless the checkout knows `LLM_ARCH_MUSE_GLIMMER`; `build` runs it first |
 | `version` | Print the built `llama-cli` version |
 | `clean` | Remove `$(BUILD_DIR)` — **inside the llama.cpp clone**, not here |
 | `download-models` | Fetch the GGUFs from Hugging Face into the HF cache |

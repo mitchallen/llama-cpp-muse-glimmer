@@ -51,11 +51,18 @@ SERVER ?= $(BUILD_DIR)/bin/llama-server
 CLI    ?= $(BUILD_DIR)/bin/llama-cli
 LLAMA  ?= $(BUILD_DIR)/bin/llama
 
-.PHONY: run help build version clean server status stop demo chat download-models list-models build-help
+# Muse Glimmer is a new architecture, so a checkout that predates it can't load
+# the model at all -- it fails on the unknown arch. Cheaper to catch that in the
+# source than after a full build, so check-arch gates build.
+ARCH_SYM ?= LLM_ARCH_MUSE_GLIMMER
+ARCH_SRC ?= $(LLAMA_CPP)/src/llama-arch.cpp
+
+.PHONY: run help build check-arch version clean server status stop demo chat download-models list-models build-help
 
 help:
 	@echo "Targets:"
 	@echo "  build            configure and build $(LLAMA_CPP) with CMake (Release, CURL on)"
+	@echo "  check-arch       verify the checkout knows $(ARCH_SYM) (build runs this first)"
 	@echo "  version          print the built llama-cli version"
 	@echo "  clean            remove the $(BUILD_DIR) directory"
 	@echo "  download-models  fetch the $(ALIAS) GGUFs from Hugging Face"
@@ -68,13 +75,31 @@ help:
 	@echo "  chat             one-shot /v1/chat/completions prompt (needs a running server)"
 	@echo "  build-help       show the upstream build instructions"
 	@echo
-	@echo "Overridable: HF_REPO HF_MODEL MODEL_FILE MMPROJ_FILE DRAFT_FILE ALIAS CTX NP HOST PORT TEMP TOP_P TOP_K LLAMA_CPP SERVER CLI LLAMA LOG BUILD_DIR JOBS CHAT_PROMPT CHAT_TOKENS CHAT_TIMEOUT CHAT_REASONING"
+	@echo "Overridable: HF_REPO HF_MODEL MODEL_FILE MMPROJ_FILE DRAFT_FILE ALIAS CTX NP HOST PORT TEMP TOP_P TOP_K LLAMA_CPP SERVER CLI LLAMA LOG BUILD_DIR JOBS ARCH_SYM ARCH_SRC CHAT_PROMPT CHAT_TOKENS CHAT_TIMEOUT CHAT_REASONING"
 	@echo "  e.g. make run PORT=8081 NP=2"
 	@echo "  llama.cpp checkout: $(LLAMA_CPP)"
 
-build:
+build: check-arch
 	cmake -S $(LLAMA_CPP) -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=ON
 	cmake --build $(BUILD_DIR) --config Release -j $(JOBS)
+
+check-arch:
+	@if [ ! -f "$(ARCH_SRC)" ]; then \
+	    echo "error: $(ARCH_SRC) not found" >&2; \
+	    echo "  LLAMA_CPP=$(LLAMA_CPP) does not look like a llama.cpp clone." >&2; \
+	    echo "  Clone it (no --depth 1, it breaks the build number):" >&2; \
+	    echo "    git clone https://github.com/ggml-org/llama.cpp $(LLAMA_CPP)" >&2; \
+	    exit 1; \
+	fi; \
+	if ! grep -q '$(ARCH_SYM)' "$(ARCH_SRC)"; then \
+	    echo "error: $(ARCH_SYM) not found in $(ARCH_SRC)" >&2; \
+	    echo "  This checkout predates $(ALIAS) support and cannot load the model." >&2; \
+	    echo "  Update it, then rebuild:" >&2; \
+	    echo "    git -C $(LLAMA_CPP) pull" >&2; \
+	    exit 1; \
+	fi; \
+	REF=$$(git -C "$(LLAMA_CPP)" describe --tags 2>/dev/null); \
+	echo "check-arch: $(ARCH_SYM) present in $(notdir $(ARCH_SRC))$${REF:+ ($$REF)}"
 
 version:
 	@if [ ! -x "$(CLI)" ]; then \
