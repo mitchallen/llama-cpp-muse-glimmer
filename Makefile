@@ -42,6 +42,17 @@ CHAT_TIMEOUT ?= 180
 # CHAT_REASONING=1 prints the reasoning trace on stderr.
 CHAT_REASONING ?= 0
 
+# opencode drives the server over the same OpenAI-compatible endpoint chat uses.
+# The context limit it advertises is per *slot*: run splits CTX across NP slots,
+# so a session only ever gets CTX/NP -- that, not CTX, is what opencode must see.
+OPENCODE      ?= opencode
+OC_PROVIDER   ?= llama-cpp
+OC_CONFIG     ?= opencode.json
+OC_MODEL      ?= $(OC_PROVIDER)/$(ALIAS)
+OC_CTX        ?= $(shell expr $(CTX) / $(NP))
+OC_MAX_TOKENS ?= 8192
+OC_PROMPT     ?= $(CHAT_PROMPT)
+
 # the llama.cpp checkout is a sibling clone, not this directory
 LLAMA_CPP ?= $(HOME)/projects/llama-cpp/llama.cpp
 BUILD_DIR ?= $(LLAMA_CPP)/build
@@ -57,7 +68,8 @@ LLAMA  ?= $(BUILD_DIR)/bin/llama
 ARCH_SYM ?= LLM_ARCH_MUSE_GLIMMER
 ARCH_SRC ?= $(LLAMA_CPP)/src/llama-arch.cpp
 
-.PHONY: run help build check-arch version clean server status stop demo chat download-models list-models build-help
+.PHONY: run help build check-arch version clean server status stop demo chat check-server \
+        opencode opencode-config opencode-check opencode-run download-models list-models build-help
 
 help:
 	@echo "Targets:"
@@ -73,9 +85,12 @@ help:
 	@echo "  stop             stop the llama-server on $(HOST):$(PORT)"
 	@echo "  demo             one-shot llama-cli prompt (no server)"
 	@echo "  chat             one-shot /v1/chat/completions prompt (needs a running server)"
+	@echo "  opencode         open the opencode TUI against $(OC_MODEL)"
+	@echo "  opencode-run     one-shot headless opencode prompt"
+	@echo "  opencode-config  (re)write $(OC_CONFIG) from the vars above"
 	@echo "  build-help       show the upstream build instructions"
 	@echo
-	@echo "Overridable: HF_REPO HF_MODEL MODEL_FILE MMPROJ_FILE DRAFT_FILE ALIAS CTX NP HOST PORT TEMP TOP_P TOP_K LLAMA_CPP SERVER CLI LLAMA LOG BUILD_DIR JOBS ARCH_SYM ARCH_SRC CHAT_PROMPT CHAT_TOKENS CHAT_TIMEOUT CHAT_REASONING"
+	@echo "Overridable: HF_REPO HF_MODEL MODEL_FILE MMPROJ_FILE DRAFT_FILE ALIAS CTX NP HOST PORT TEMP TOP_P TOP_K LLAMA_CPP SERVER CLI LLAMA LOG BUILD_DIR JOBS ARCH_SYM ARCH_SRC CHAT_PROMPT CHAT_TOKENS CHAT_TIMEOUT CHAT_REASONING OPENCODE OC_PROVIDER OC_CONFIG OC_MODEL OC_CTX OC_MAX_TOKENS OC_PROMPT"
 	@echo "  e.g. make run PORT=8081 NP=2"
 	@echo "  llama.cpp checkout: $(LLAMA_CPP)"
 
@@ -172,16 +187,20 @@ demo:
 	    --temp $(TEMP) --top-p $(TOP_P) --top-k $(TOP_K) \
 	    -st -p "$(DEMO_PROMPT)"
 
-chat:
-	@set -o pipefail; \
-	export ALIAS="$(ALIAS)" CHAT_PROMPT="$(CHAT_PROMPT)" CHAT_TOKENS="$(CHAT_TOKENS)" \
-	       TEMP="$(TEMP)" TOP_P="$(TOP_P)" TOP_K="$(TOP_K)" CHAT_REASONING="$(CHAT_REASONING)"; \
-	CODE=$$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://$(HOST):$(PORT)/health 2>/dev/null); \
+# gate for every target that talks to a running server, so they fail with one
+# message instead of a client-side timeout or a connection refused
+check-server:
+	@CODE=$$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://$(HOST):$(PORT)/health 2>/dev/null); \
 	case "$$CODE" in \
 	    200) ;; \
 	    503) echo "error: llama-server on $(HOST):$(PORT) is still loading the model" >&2; exit 1 ;; \
 	    *)   echo "error: no llama-server on $(HOST):$(PORT) (health: $${CODE:-no response}) -- run: make run" >&2; exit 1 ;; \
-	esac; \
+	esac
+
+chat: check-server
+	@set -o pipefail; \
+	export ALIAS="$(ALIAS)" CHAT_PROMPT="$(CHAT_PROMPT)" CHAT_TOKENS="$(CHAT_TOKENS)" \
+	       TEMP="$(TEMP)" TOP_P="$(TOP_P)" TOP_K="$(TOP_K)" CHAT_REASONING="$(CHAT_REASONING)"; \
 	python3 -c 'import json, os, sys; json.dump({"model": os.environ["ALIAS"], "messages": [{"role": "user", "content": os.environ["CHAT_PROMPT"]}], "max_tokens": int(os.environ["CHAT_TOKENS"]), "temperature": float(os.environ["TEMP"]), "top_p": float(os.environ["TOP_P"]), "top_k": int(os.environ["TOP_K"])}, sys.stdout)' \
 	| curl -s -m $(CHAT_TIMEOUT) http://$(HOST):$(PORT)/v1/chat/completions \
 	    -H 'Content-Type: application/json' -d @- \
@@ -195,6 +214,37 @@ chat:
 	print(body) if body else None; \
 	print("[finish: %s  tokens: %s prompt / %s completion]" % (c.get("finish_reason"), u.get("prompt_tokens"), u.get("completion_tokens")), file=sys.stderr); \
 	sys.exit("error: content empty -- all %s tokens went to reasoning_content. Raise CHAT_TOKENS (now %s), or CHAT_REASONING=1 to see the trace." % (u.get("completion_tokens"), os.environ["CHAT_TOKENS"])) if not body else None'
+
+# opencode merges ./$(OC_CONFIG) over ~/.config/opencode/opencode.json, so the
+# provider only exists while opencode runs from this directory. Regenerate after
+# changing HOST/PORT/ALIAS/CTX/NP -- the checked-in file holds the defaults.
+opencode-config:
+	@ALIAS="$(ALIAS)" HOST="$(HOST)" PORT="$(PORT)" OC_PROVIDER="$(OC_PROVIDER)" \
+	 OC_CTX="$(OC_CTX)" OC_MAX_TOKENS="$(OC_MAX_TOKENS)" TEMP="$(TEMP)" TOP_P="$(TOP_P)" \
+	 python3 -c 'import json, os, sys; \
+	e = os.environ; \
+	model = {"name": e["ALIAS"] + " (llama.cpp)", "attachment": True, "reasoning": True, "tool_call": True, "temperature": True, "limit": {"context": int(e["OC_CTX"]), "output": int(e["OC_MAX_TOKENS"])}, "options": {"temperature": float(e["TEMP"]), "top_p": float(e["TOP_P"])}}; \
+	provider = {"name": "llama.cpp (local)", "npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://%s:%s/v1" % (e["HOST"], e["PORT"])}, "models": {e["ALIAS"]: model}}; \
+	json.dump({"$$schema": "https://opencode.ai/config.json", "model": e["OC_PROVIDER"] + "/" + e["ALIAS"], "provider": {e["OC_PROVIDER"]: provider}}, sys.stdout, indent=2); \
+	print()' > $(OC_CONFIG).tmp && mv $(OC_CONFIG).tmp $(OC_CONFIG)
+	@echo "wrote $(OC_CONFIG): $(OC_MODEL) -> http://$(HOST):$(PORT)/v1 (context $(OC_CTX), max output $(OC_MAX_TOKENS))"
+
+opencode: check-server opencode-check
+	$(OPENCODE) --model $(OC_MODEL)
+
+# headless equivalent of chat, but through opencode's agent loop (tools and all)
+opencode-run: check-server opencode-check
+	$(OPENCODE) run --model $(OC_MODEL) "$(OC_PROMPT)"
+
+opencode-check:
+	@if ! command -v $(OPENCODE) >/dev/null 2>&1; then \
+	    echo "error: $(OPENCODE) not found -- install it: brew install opencode" >&2; \
+	    exit 1; \
+	fi; \
+	if [ ! -f "$(OC_CONFIG)" ]; then \
+	    echo "error: $(OC_CONFIG) not found -- run: make opencode-config" >&2; \
+	    exit 1; \
+	fi
 
 download-models:
 	@if [ ! -x "$(LLAMA)" ]; then \

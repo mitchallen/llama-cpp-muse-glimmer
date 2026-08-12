@@ -98,6 +98,7 @@ make download-models    # ~18 GB of GGUFs into the HF cache
 make server             # build, then serve on 127.0.0.1:8080
 make status             # is it up?
 make chat               # one-shot prompt through /v1/chat/completions
+make opencode           # drive the model from the opencode TUI
 make stop               # shut it down
 ```
 
@@ -117,6 +118,9 @@ make stop               # shut it down
 | `stop` | Stop the server, verifying the port owner is really `llama-server` |
 | `demo` | One-shot `llama-cli` prompt, no server needed |
 | `chat` | One-shot `/v1/chat/completions` prompt against a running server |
+| `opencode` | Open the [opencode](https://opencode.ai) TUI against the running server |
+| `opencode-run` | One-shot headless opencode prompt |
+| `opencode-config` | (Re)write `opencode.json` from the Makefile variables |
 | `build-help` | Upstream build docs pointer |
 
 `make help` lists these along with every overridable variable.
@@ -137,6 +141,71 @@ directory itself. Note the drafter is downloaded but **not** currently passed to
 
 `run` serves 131072 context across 4 slots (32768 each) with `--jinja` and the
 model's recommended sampling (`--temp 1.0 --top-p 0.95 --top-k 64`).
+
+## Using it from opencode
+
+[opencode](https://opencode.ai) talks to the same OpenAI-compatible endpoint
+`make chat` uses, so the running server is a drop-in local model for it. Start
+the server, then:
+
+```sh
+make run                         # in one shell
+make opencode                    # in another — opens the TUI on this model
+make opencode-run                # or headless, one prompt and out
+make opencode-run OC_PROMPT="explain the run target"
+```
+
+Both targets fail with one clear message if the server isn't up (or is still
+loading) and if `opencode` isn't installed (`brew install opencode`).
+
+### The `opencode.json` in this repo
+
+opencode merges a project-local `opencode.json` over your global
+`~/.config/opencode/opencode.json`, so the provider defined here **only exists
+while opencode runs from this directory** — nothing global is touched, and your
+usual default model is untouched everywhere else. The checked-in file registers
+llama-server as an openai-compatible provider:
+
+```json
+{
+  "model": "llama-cpp/muse-glimmer-30B",
+  "provider": {
+    "llama-cpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:8080/v1" },
+      "models": { "muse-glimmer-30B": { "limit": { "context": 32768, "output": 8192 } } }
+    }
+  }
+}
+```
+
+No API key is involved — llama-server doesn't ask for one unless you start it
+with `--api-key`.
+
+It holds the *defaults*. If you serve on another port, rename the alias, or
+change the context split, regenerate it so opencode agrees with the server:
+
+```sh
+make opencode-config PORT=8081        # rewrites opencode.json from the Makefile vars
+```
+
+Verify what opencode resolved with `opencode models llama-cpp`.
+
+### Give it the whole context window
+
+`run` splits `CTX` across `NP` slots, so with the defaults (131072 / 4) a single
+session only gets **32768 tokens** — which an agent chews through fast. That
+per-slot number, not `CTX`, is what `opencode-config` writes as the context
+limit (`OC_CTX`), because advertising more would let opencode pack a prompt the
+slot can't hold.
+
+For agent work, serve one slot and take the full window:
+
+```sh
+make run NP=1
+make opencode-config NP=1    # context limit becomes 131072
+make opencode
+```
 
 ## Notes
 

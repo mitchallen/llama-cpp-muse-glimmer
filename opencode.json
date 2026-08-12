@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "llama-cpp/muse-glimmer-30B",
+  "provider": {
+    "llama-cpp": {
+      "name": "llama.cpp (local)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      },
+      "models": {
+        "muse-glimmer-30B": {
+          "name": "muse-glimmer-30B (llama.cpp)",
+          "attachment": true,
+          "reasoning": true,
+          "tool_call": true,
+          "temperature": true,
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          },
+          "options": {
+            "temperature": 1.0,
+            "top_p": 0.95
+          }
+        }
+      }
+    }
+  }
+}
