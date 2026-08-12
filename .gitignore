@@ -1,0 +1,3 @@
+# llama-server output, written by `make run` via tee; LOG defaults to server.log
+# but is overridable, so ignore any log
+*.log
